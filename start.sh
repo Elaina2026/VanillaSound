@@ -3,9 +3,11 @@ set -u
 
 BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Locate NodeLink directory (supports ./NodeLink, ../NodeLink, or NODELINK_DIR env override)
+# Locate NodeLink directory (supports NODELINK_DIR env override, ./build-nodelink, ./NodeLink, ../NodeLink)
 if [ -n "${NODELINK_DIR:-}" ]; then
   NL_DIR="$NODELINK_DIR"
+elif [ -d "$BOT_DIR/build-nodelink" ]; then
+  NL_DIR="$BOT_DIR/build-nodelink"
 elif [ -d "$BOT_DIR/NodeLink" ]; then
   NL_DIR="$BOT_DIR/NodeLink"
 elif [ -d "$BOT_DIR/../NodeLink" ]; then
@@ -85,6 +87,28 @@ run_nodelink_supervisor() {
   if [ ! -d "$NL_DIR" ]; then
     echo "[VanillaSound] [$(timestamp)] NodeLink directory not found at $NL_DIR."
     exit 1
+  fi
+
+  if [ ! -d "$NL_DIR/node_modules/@performanc/pwsl-server" ]; then
+    if [ ! -f "$NL_DIR/package.json" ] && [ -f "$NL_DIR/dist/package.json" ]; then
+      echo "[VanillaSound] [$(timestamp)] Restoring $NL_DIR/package.json from dist/package.json..."
+      cp "$NL_DIR/dist/package.json" "$NL_DIR/package.json"
+    fi
+    if [ ! -f "$NL_DIR/package.json" ]; then
+      echo "[VanillaSound] [$(timestamp)] Missing $NL_DIR/package.json; cannot install NodeLink dependencies."
+      exit 1
+    fi
+    echo "[VanillaSound] [$(timestamp)] NodeLink dependencies missing in $NL_DIR. Running npm install --omit=dev..."
+    (cd "$NL_DIR" && npm install --omit=dev --no-audit --no-fund --allow-git=all --ignore-scripts) || exit 1
+  fi
+
+  if [ ! -f "$NL_DIR/config.default.ts" ] && [ ! -f "$NL_DIR/config.default.js" ] && [ -f "$NL_DIR/dist/config.default.js" ]; then
+    echo "[VanillaSound] [$(timestamp)] Restoring $NL_DIR/config.default.js from dist/config.default.js..."
+    cp "$NL_DIR/dist/config.default.js" "$NL_DIR/config.default.js"
+  fi
+  if [ ! -f "$NL_DIR/config.ts" ] && [ ! -f "$NL_DIR/config.js" ] && [ -f "$NL_DIR/dist/config.js" ]; then
+    echo "[VanillaSound] [$(timestamp)] Copying $NL_DIR/dist/config.js to $NL_DIR/config.js..."
+    cp "$NL_DIR/dist/config.js" "$NL_DIR/config.js"
   fi
 
   while [ "$STOPPING" -eq 0 ]; do

@@ -1,4 +1,5 @@
 node_modules/
+build-nodelink/
 .env
 data/247.json
 data/247.json.bak
