@@ -1,101 +1,144 @@
 import { spawnSync } from 'node:child_process';
+import dns from 'node:dns';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
-const REPO_URL = 'https://github.com/Elaina2026/VanillaSound.git';
+dns.setDefaultResultOrder('ipv4first');
+
+const OWNER = 'Elaina2026';
+const REPO = 'VanillaSound';
+const BRANCH = 'main';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TARGET_DIR = fs.existsSync('/home/container') ? '/home/container' : SCRIPT_DIR;
 
+const KEEP_FILES = new Set([
+  'index.js',
+  'package.json',
+  'package-lock.json',
+  '.env.example',
+  'README.md',
+  'start.sh',
+  'start-all.mjs',
+  'data/.gitkeep'
+]);
+
 /**
- * Recursively copies a directory without overwriting preserved paths.
- * @param {string} src
- * @param {string} dest
+ * Extracts needed bot files from an uncompressed POSIX tar buffer into destDir.
+ * Preserves existing .env, data/247.json, and build-nodelink/.
+ * @param {Buffer} tarBuffer
+ * @param {string} destDir
+ * @returns {number}
  */
-function copyDir(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDir(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
+function extractTarToDir(tarBuffer, destDir) {
+  let offset = 0;
+  let count = 0;
 
-function runCommand(cmd, args, cwd) {
-  return spawnSync(cmd, args, {
-    cwd,
-    stdio: 'inherit',
-    shell: process.platform === 'win32'
-  });
-}
+  while (offset + 512 <= tarBuffer.length) {
+    const header = tarBuffer.subarray(offset, offset + 512);
+    if (header.every((b) => b === 0)) break;
 
-function main() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vanillasound-'));
-  console.log(`[VanillaSound] Downloading bot files into ${TARGET_DIR}...`);
+    const rawName = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const rawPrefix = header.subarray(345, 500).toString('utf8').replace(/\0.*$/, '');
+    const fullName = rawPrefix ? `${rawPrefix}/${rawName}` : rawName;
+    const sizeOctal = header.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim();
+    const fileSize = sizeOctal ? Number.parseInt(sizeOctal, 8) : 0;
+    const typeFlag = String.fromCharCode(header[156] || 48);
 
-  try {
-    const clone = runCommand('git', ['clone', '--depth', '1', REPO_URL, tmpDir], TARGET_DIR);
-    if (clone.status !== 0) {
-      throw new Error(`git clone failed with code ${clone.status ?? 'unknown'}`);
-    }
+    offset += 512;
+    const dataEnd = offset + fileSize;
+    const paddedSize = Math.ceil(fileSize / 512) * 512;
 
-    const filesToCopy = [
-      'index.js',
-      'package.json',
-      'package-lock.json',
-      '.env.example',
-      'README.md',
-      'start.sh'
-    ];
+    if (typeFlag === '0' || typeFlag === '\0') {
+      const slashIndex = fullName.indexOf('/');
+      const relPath = slashIndex >= 0 ? fullName.slice(slashIndex + 1) : fullName;
 
-    for (const file of filesToCopy) {
-      const srcFile = path.join(tmpDir, file);
-      const destFile = path.join(TARGET_DIR, file);
-      if (fs.existsSync(srcFile)) {
-        fs.copyFileSync(srcFile, destFile);
+      if (relPath && (KEEP_FILES.has(relPath) || relPath.startsWith('src/'))) {
+        const outPath = path.join(destDir, ...relPath.split('/'));
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        fs.writeFileSync(outPath, tarBuffer.subarray(offset, dataEnd));
+        count += 1;
       }
     }
 
-    const srcCodeDir = path.join(tmpDir, 'src');
-    if (fs.existsSync(srcCodeDir)) {
-      copyDir(srcCodeDir, path.join(TARGET_DIR, 'src'));
-    }
-
-    const dataDir = path.join(TARGET_DIR, 'data');
-    fs.mkdirSync(dataDir, { recursive: true });
-    const gitkeepSrc = path.join(tmpDir, 'data', '.gitkeep');
-    if (fs.existsSync(gitkeepSrc)) {
-      fs.copyFileSync(gitkeepSrc, path.join(dataDir, '.gitkeep'));
-    }
-
-    console.log('[VanillaSound] Installing bot dependencies...');
-    const install = runCommand(
-      'npm',
-      ['install', '--omit=dev', '--no-audit', '--no-fund'],
-      TARGET_DIR
-    );
-    if (install.status !== 0) {
-      throw new Error(`npm install failed with code ${install.status ?? 'unknown'}`);
-    }
-
-    console.log(`[VanillaSound] Done! index.js and src/ are ready in ${TARGET_DIR}.`);
-    console.log('[VanillaSound] You can now run: node start-all.mjs');
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    offset += paddedSize;
   }
+
+  return count;
 }
 
-try {
-  main();
-} catch (error) {
+/**
+ * Downloads the repository tarball via GitHub API (supports private repos with GITHUB_TOKEN).
+ * @param {string} token
+ * @returns {Promise<Buffer>}
+ */
+async function downloadTarball(token) {
+  const url = `https://api.github.com/repos/${OWNER}/${REPO}/tarball/${BRANCH}`;
+  const headers = {
+    'User-Agent': 'VanillaSound-Setup/1.0',
+    Accept: 'application/vnd.github+json'
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  console.log(`[VanillaSound] Downloading repository archive from GitHub...`);
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(30_000),
+    headers
+  });
+
+  if (response.status === 404 || response.status === 401 || response.status === 403) {
+    throw new Error(
+      `GitHub returned HTTP ${response.status}. Repository "${OWNER}/${REPO}" is private or unreachable. ` +
+        'Set GITHUB_TOKEN=<your_token> (or pass it as an argument: node setup-bot.mjs <token>), ' +
+        'make the repository Public, or upload index.js + src/ + package.json directly.'
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const gzBuffer = Buffer.from(await response.arrayBuffer());
+  console.log(`[VanillaSound] Downloaded ${(gzBuffer.length / 1024).toFixed(1)} KB. Extracting...`);
+  return zlib.gunzipSync(gzBuffer);
+}
+
+async function main() {
+  const token = (process.argv[2] || process.env.GITHUB_TOKEN || '').trim();
+  const tarBuffer = await downloadTarball(token);
+  const extracted = extractTarToDir(tarBuffer, TARGET_DIR);
+
+  if (extracted === 0) {
+    throw new Error('No bot files were extracted from the archive.');
+  }
+
+  console.log(`[VanillaSound] Extracted ${extracted} file(s) into ${TARGET_DIR}.`);
+  console.log('[VanillaSound] Installing bot dependencies...');
+
+  const install = spawnSync(
+    'npm',
+    ['install', '--omit=dev', '--no-audit', '--no-fund'],
+    {
+      cwd: TARGET_DIR,
+      stdio: 'inherit',
+      shell: process.platform === 'win32'
+    }
+  );
+
+  if (install.status !== 0) {
+    throw new Error(`npm install failed with code ${install.status ?? 'unknown'}`);
+  }
+
+  console.log(`[VanillaSound] Done! Ready in ${TARGET_DIR}. Run: node start-all.mjs`);
+}
+
+main().catch((error) => {
   console.error(
     '[VanillaSound] Setup failed:',
     error instanceof Error ? error.message : String(error)
   );
   process.exit(1);
-}
+});
