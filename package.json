@@ -1,0 +1,19 @@
+{
+  "name": "vanillasound",
+  "version": "1.0.0",
+  "description": "Production-ready Discord music bot powered by discord.js v14, Shoukaku v4, and NodeLink.",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "start:all": "bash ./start.sh"
+  },
+  "dependencies": {
+    "discord.js": "^14.28.1",
+    "dotenv": "^18.0.10",
+    "shoukaku": "^4.3.0"
+  }
+}
